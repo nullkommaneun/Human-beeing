@@ -103,6 +103,33 @@
 </section>
 
 <section class="card">
+  <h2 style="margin-top:4px">6) Genom-Visualisierung (alle Chromosomen)</h2>
+  <div class="toolbar">
+    <label>Modus
+      <select id="vizMode">
+        <option value="heat">Heatmap (Bins)</option>
+        <option value="scatter">Scatter (Punkte)</option>
+      </select>
+    </label>
+    <label>Bins/Chrom
+      <input id="vizBins" type="number" min="10" max="1000" value="120" style="width:90px"/>
+    </label>
+    <label>Max-Punkte (Scatter)
+      <input id="vizMaxPts" type="number" min="1000" max="400000" value="120000" style="width:110px"/>
+    </label>
+    <label class="row" style="align-items:center">
+      <input id="vizHiAnn" type="checkbox">annotierte hervorheben
+    </label>
+  </div>
+  <canvas id="genomeCanvas" height="620"
+    title="Genomweite Darstellung deiner geladenen Datei (client-seitig)"></canvas>
+  <div id="genomeInfo" class="hint" style="margin-top:6px">
+    Tipp: Hover zeigt Bereich; Klick auf eine Zeile öffnet den Chromosom-Zoom. Filter wirken auch hier.
+  </div>
+</section>
+
+    
+<section class="card">
   <h2 style="margin-top:4px">Datenschutz & Haftung</h2>
   <ul>
     <li>Verarbeitung findet ausschließlich im Browser statt (kein Upload).</li>
@@ -314,5 +341,135 @@
 
   // Initial draw baseline
   computeKPIs([]); drawIdeogram();
+
+    <script>
+/* ===== Genom-Visualisierung (Section 6) ===== */
+const G = { layout:{ rowH:22, gap:8, padX:14, top:18 }, perChr:new Map() };
+
+function currentFilteredForGenome(){
+  const chr = E('#fltChr')?.value?.trim()||'';
+  const rsid = E('#fltRsid')?.value?.trim().toLowerCase()||'';
+  const gt = E('#fltGt')?.value?.trim().toUpperCase()||'';
+  let rows = S.rowsActive;
+  if(chr) rows = rows.filter(r=>r.chromosome===chr);
+  if(rsid) rows = rows.filter(r=>r.rsid.toLowerCase().includes(rsid));
+  if(gt) rows = rows.filter(r=>r.genotype===gt);
+  if(E('#chkOnlyAnnotated')?.checked) rows = rows.filter(r=>S.annotations.has(r.rsid));
+  return rows;
+}
+
+function rebuildGenomeIndex(){
+  G.perChr.clear();
+  const rows = currentFilteredForGenome();
+  const chroms = ['1','2','3','4','5','6','7','8','9','10','11','12','13','14','15','16','17','18','19','20','21','22','X','Y','MT'];
+  for(const c of chroms){
+    const subset = rows.filter(r=>r.chromosome===c);
+    if(!subset.length){ G.perChr.set(c,{rows:[],min:0,max:1}); continue; }
+    const min = Math.min(...subset.map(r=>r.position));
+    const max = Math.max(...subset.map(r=>r.position));
+    G.perChr.set(c,{rows:subset,min,max});
+  }
+}
+
+function drawGenome(){
+  const c = E('#genomeCanvas'); if(!c) return;
+  const ctx = c.getContext('2d');
+  const dpr = window.devicePixelRatio||1; c.width=c.clientWidth*dpr; c.height=c.clientHeight*dpr; ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,c.clientWidth,c.clientHeight);
+
+  const mode = E('#vizMode').value;
+  const bins = Math.max(10, Math.min(1000, parseInt(E('#vizBins').value)||120));
+  const hiAnn = E('#vizHiAnn').checked;
+
+  const W=c.clientWidth, padX=G.layout.padX;
+  const rowH=G.layout.rowH, gap=G.layout.gap, top=G.layout.top;
+  const chroms=['1','2','3','4','5','6','7','8','9','10','11','12','13','14','15','16','17','18','19','20','21','22','X','Y','MT'];
+
+  ctx.font='12px ui-monospace,Consolas,monospace'; ctx.fillStyle='#9fb0c1';
+  const hit=[];
+
+  chroms.forEach((chr,idx)=>{
+    const y0=top+idx*(rowH+gap);
+    const yMid=y0+rowH/2;
+    ctx.fillStyle='#9fb0c1'; ctx.fillText(chr, 4, yMid+4);
+
+    const x0=padX+28, x1=W - padX, w=x1-x0;
+    ctx.fillStyle='#12202c'; ctx.fillRect(x0, yMid-1, w, 2);
+
+    const info = G.perChr.get(chr)||{rows:[],min:0,max:1};
+    if(!info.rows.length){ hit.push({chr,y0:y0,y1:y0+rowH}); return; }
+
+    if(mode==='heat'){
+      const binSize=(info.max-info.min+1)/bins;
+      const counts=new Array(bins).fill(0);
+      if(binSize>0){
+        for(const r of info.rows){
+          const i=Math.max(0,Math.min(bins-1, Math.floor((r.position-info.min)/binSize)));
+          counts[i]++;
+        }
+      }
+      const maxC=Math.max(1,...counts);
+      for(let i=0;i<bins;i++){
+        const t=counts[i]/maxC;
+        const col=`rgba(103,183,255,${(0.12+0.78*t).toFixed(3)})`;
+        const tx=x0 + (i/bins)*w; const tw=Math.max(1, w/bins - 0.5);
+        const th=Math.max(2, Math.round((rowH-6)*t));
+        ctx.fillStyle=col; ctx.fillRect(tx, yMid - th/2, tw, th);
+      }
+      ctx.fillStyle='#62707e'; ctx.fillRect(x0, yMid-1, 1, 2); ctx.fillRect(x1-1, yMid-1, 1, 2);
+    } else {
+      const maxPts = Math.max(1000, Math.min(400000, parseInt(E('#vizMaxPts').value)||120000));
+      const n=info.rows.length;
+      const step=Math.max(1, Math.floor(n/Math.min(n, Math.floor(maxPts/24))));
+      let j=0;
+      for(const r of info.rows){
+        if((j++ % step)!==0) continue;
+        const t = (r.position - info.min) / Math.max(1,(info.max-info.min));
+        const x = x0 + t*w;
+        const y = yMid + (Math.random()*0.75 - 0.375) * (rowH-6); // leichtes Jitter
+        const annotated = hiAnn && S.annotations.has(r.rsid);
+        const bookmarked = S.bookmarks.has(r.rsid);
+        ctx.fillStyle = bookmarked ? '#ffd166' : (annotated ? '#4ea1ff' : '#a0b3c4');
+        ctx.fillRect(x, y, 1, 1);
+      }
+    }
+    hit.push({chr, y0:y0, y1:y0+rowH, x0, x1, min:info.min, max:info.max});
+  });
+
+  c.onmousemove = (ev)=>{
+    const rect=c.getBoundingClientRect(); const mx=ev.clientX-rect.left; const my=ev.clientY-rect.top;
+    const zone=hit.find(h=>my>=h.y0&&my<=h.y1);
+    if(!zone){ E('#genomeInfo').textContent='—'; return; }
+    if(zone.x0==null){ E('#genomeInfo').textContent=`Chr ${zone.chr}: keine Daten`; return; }
+    const t=Math.max(0, Math.min(1, (mx - zone.x0) / Math.max(1, zone.x1 - zone.x0)));
+    const pos=Math.round(zone.min + t*(zone.max-zone.min));
+    E('#genomeInfo').textContent = `Chr ${zone.chr} | Position ≈ ${pos.toLocaleString('de-DE')} | Modus: ${E('#vizMode').value}`;
+  };
+  c.onclick = (ev)=>{
+    const rect=c.getBoundingClientRect(); const my=ev.clientY-rect.top;
+    const zone=hit.find(h=>my>=h.y0&&h<=h.y1);
+    if(zone){ setZoomChrom(zone.chr); window.scrollTo({top: c.offsetTop + 400, behavior:'smooth'}); }
+  };
+}
+
+/* Re-draw Hooks */
+;['vizMode','vizBins','vizMaxPts','vizHiAnn'].forEach(id=>{
+  const el=E('#'+id); if(el) el.addEventListener('input', ()=>{ rebuildGenomeIndex(); drawGenome(); });
+});
+
+/* Stelle sicher, dass bei bestehenden Aktionen neu gezeichnet wird */
+const __applyFilters = applyFilters;
+applyFilters = function(){ __applyFilters(); rebuildGenomeIndex(); drawGenome(); };
+
+const __persistBookmarksMaybe = persistBookmarksMaybe;
+persistBookmarksMaybe = function(){ __persistBookmarksMaybe(); rebuildGenomeIndex(); drawGenome(); };
+
+E('#chkOnlyAnnotated')?.addEventListener('change', ()=>{ applyFilters(); });
+
+/* Initial */
+rebuildGenomeIndex(); drawGenome();
+</script>
+
+  
   </script></body>
 </html>
